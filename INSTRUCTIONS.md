@@ -1,13 +1,13 @@
 # 🧑‍🤝‍🧑 VibinWork — iOS App
 
-An iOS productivity app that matches users for real-time, one-on-one, timed co-working sessions with similar interests. Built using SwiftUI, Supabase, and integrated with a voice SDK (Twilio/Agora/Daily).
+An iOS productivity app that matches users for real-time, one-on-one, timed co-working sessions with similar interests. Built using SwiftUI, Supabase, and integrated with a voice SDK (Agora).
 
 ---
 
 ## 📌 MVP Feature Overview
 
 - ✅ User Authentication (Google Sign-In via Supabase, fully implemented)
-- 🎯 Profile creation with goals/interests (Onboarding branch created, UI and Supabase integration next)
+- ✅ Profile creation with goals/interests (Onboarding flow implemented, data saved to Supabase)
 - 🤝 Matchmaking with real-time availability
 - 🎙️ In-app 1:1 voice call
 - ⏱️ Timer-based sessions (e.g., 25/50 min)
@@ -21,8 +21,8 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 | Layer        | Tech Stack                                                  |
 |--------------|-------------------------------------------------------------|
 | **Frontend** | SwiftUI (iOS), Combine                                      |
-| **Backend**  | Supabase (PostgreSQL, Auth, Edge Functions, Realtime)      |
-| **Voice SDK**| Twilio Voice / Agora / Daily.co (Pick 1)                    |
+| **Backend**  | Supabase (PostgreSQL, Auth, Edge Functions, Realtime)       |
+| **Voice SDK**|  Agora                                                      |
 | **Storage**  | Supabase Storage (user avatars etc.)                        |
 | **DevOps**   | Xcode, Git, TestFlight, App Store Connect                   |
 
@@ -104,25 +104,19 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 
 ---
 
-### 👤 Onboarding / Profile Setup
+### ✅ Onboarding / Profile Setup
 
-**Next up:**
-- Onboarding branch created (`feature/onboarding`)
-- Will collect the following from the user after authentication:
-
-| Step | Field                  | Input Type                       |
-|------|------------------------|----------------------------------|
-| 1    | `username`             | Text                             |
-| 2    | `avatar_url`           | Image upload (Supabase Storage)  |
-| 3    | `focus_goal`           | Short text input                 |
-| 4    | `interests`            | Multi-select chips or tags       |
-| 5    | `working_style`        | Single select (deep, chatty, etc.)|
-| 6    | `session_pref_duration`| Number picker (25/50/etc)        |
-| 7    | `timezone`             | Auto-detect or dropdown          |
-| 8    | `availability`         | (Optional) Calendar/time slots   |
-| 9    | `experience_level`     | Beginner / Intermediate / Expert |
-
-- Then insert into Supabase `users` table.
+- Onboarding flow is live and collects:
+  - Username (auto-filled from Google)
+  - Google profile image (avatar)
+  - Focus goal
+  - Interests (multi-select)
+  - Working style (dropdown)
+  - Session preferred duration (picker)
+  - Timezone (dropdown, default Asia/Kolkata)
+  - Availability (dropdown)
+  - Experience level (dropdown)
+- Data is saved to the Supabase `users` table on completion.
 
 ---
 
@@ -216,6 +210,7 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 ## 🚀 Launch Checklist
 
 - [x] Complete authentication (Google sign-in)
+- [x] Complete onboarding (profile creation, save to Supabase)
 - [ ] Complete onboarding → match → call flow
 - [ ] Run end-to-end manual tests
 - [ ] Push to TestFlight and gather feedback

@@ -52,22 +52,23 @@ class AuthViewModel: ObservableObject {
     }
 }
 
-struct UserProfile: Encodable {
+struct UserProfile: Decodable, Encodable {
     let id: String
     let email: String
-    let username: String
-    let avatar_url: String
-    let focus_goal: String
-    let interests: [String]
-    let working_style: String
-    let session_pref_duration: Int
-    let timezone: String
-    let availability: String
-    let experience_level: String
+    let username: String?
+    let avatar_url: String?
+    let focus_goal: String?
+    let interests: [String]?
+    let working_style: String?
+    let session_pref_duration: Int?
+    let timezone: String?
+    let availability: String?
+    let experience_level: String?
 }
 
 struct MainView: View {
     let user: User
+    @State private var isMatching = false
     var body: some View {
         let fullName: String = {
             if let anyJson = user.userMetadata["full_name"], case let .string(name) = anyJson {
@@ -75,13 +76,56 @@ struct MainView: View {
             }
             return "User"
         }()
-        VStack(spacing: 16) {
+        VStack(spacing: 24) {
             Text("Welcome, \(fullName)!")
                 .font(.title)
             Text("Email: \(user.email ?? "N/A")")
                 .foregroundColor(.secondary)
+            Spacer().frame(height: 32)
+            Button(action: {
+                isMatching = true
+            }) {
+                HStack {
+                    Image(systemName: "person.2.fill")
+                    Text("Find Partner")
+                        .fontWeight(.semibold)
+                }
+                .foregroundColor(.white)
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(Color.green)
+                .cornerRadius(12)
+                .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
+            }
+            .accessibilityLabel("Find Partner")
+            .padding(.horizontal, 32)
+            Spacer()
         }
         .padding()
+        .fullScreenCover(isPresented: $isMatching) {
+            MatchLoadingView(isPresented: $isMatching)
+        }
+    }
+}
+
+struct MatchLoadingView: View {
+    @Binding var isPresented: Bool
+    var body: some View {
+        VStack(spacing: 32) {
+            ProgressView()
+                .scaleEffect(2)
+            Text("Looking for a partner...")
+                .font(.title2)
+                .fontWeight(.medium)
+            Button("Cancel") {
+                isPresented = false
+            }
+            .foregroundColor(.red)
+            .padding(.top, 24)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground).opacity(0.95))
+        .ignoresSafeArea()
     }
 }
 
@@ -331,12 +375,8 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             if let user = authVM.user {
-                if onboardingState.showOnboarding {
-                    OnboardingView(user: user)
-                        .environmentObject(onboardingState)
-                } else {
-                    MainView(user: user)
-                }
+                ProfileCheckView(user: user)
+                    .environmentObject(onboardingState)
             } else {
                 ZStack {
                     Color(.systemBackground).ignoresSafeArea()
@@ -375,6 +415,54 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+    }
+}
+
+struct ProfileCheckView: View {
+    let user: User
+    @EnvironmentObject var onboardingState: OnboardingState
+    @State private var isLoading = true
+    @State private var error: String? = nil
+
+    var body: some View {
+        Group {
+            if isLoading {
+                ProgressView("Checking profile...")
+            } else if onboardingState.showOnboarding {
+                OnboardingView(user: user)
+                    .environmentObject(onboardingState)
+            } else {
+                MainView(user: user)
+            }
+        }
+        .onAppear {
+            Task {
+                await checkProfile()
+            }
+        }
+    }
+
+    func checkProfile() async {
+        guard let email = user.email else {
+            await MainActor.run { onboardingState.showOnboarding = true; isLoading = false }
+            return
+        }
+        do {
+            let response = try await SupabaseManager.shared.client
+                .from("users")
+                .select()
+                .eq("email", value: email)
+                .single()
+                .execute()
+            if let profile = try? JSONDecoder().decode(UserProfile.self, from: response.data),
+               let username = profile.username, !username.isEmpty {
+                await MainActor.run { onboardingState.showOnboarding = false; isLoading = false }
+            } else {
+                await MainActor.run { onboardingState.showOnboarding = true; isLoading = false }
+            }
+        } catch {
+            await MainActor.run { onboardingState.showOnboarding = true; isLoading = false }
         }
     }
 }
