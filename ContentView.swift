@@ -52,6 +52,20 @@ class AuthViewModel: ObservableObject {
     }
 }
 
+struct UserProfile: Encodable {
+    let id: String
+    let email: String
+    let username: String
+    let avatar_url: String
+    let focus_goal: String
+    let interests: [String]
+    let working_style: String
+    let session_pref_duration: Int
+    let timezone: String
+    let availability: String
+    let experience_level: String
+}
+
 struct MainView: View {
     let user: User
     var body: some View {
@@ -71,13 +85,258 @@ struct MainView: View {
     }
 }
 
+struct OnboardingView: View {
+    let user: User
+    @State private var step = 0
+    @State private var username: String
+    @State private var avatarUrl: String
+    @State private var focusGoal = ""
+    @State private var interests: [String] = []
+    @State private var workingStyle = "Deep Focus"
+    @State private var sessionPrefDuration = 25
+    // Robust timezone Picker setup
+    let defaultTimezone = "Asia/Kolkata"
+    let timezones: [String] = {
+        var zones = TimeZone.knownTimeZoneIdentifiers
+        if !zones.contains("Asia/Kolkata") {
+            zones.append("Asia/Kolkata")
+        }
+        return zones.sorted()
+    }()
+    @State private var timezone = "Asia/Kolkata"
+    @State private var availability = "Morning"
+    @State private var experienceLevel = "Beginner"
+    @State private var isSaving = false
+    @State private var errorMessage: String? = nil
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.presentationMode) var presentationMode
+    @Environment(\.scenePhase) var scenePhase
+    @EnvironmentObject var onboardingState: OnboardingState
+
+    let workingStyles = ["Deep Focus", "Pomodoro", "Chatty"]
+    let experienceLevels = ["Beginner", "Intermediate", "Expert"]
+    let availabilityOptions = ["Morning", "Afternoon", "Evening"]
+
+    init(user: User) {
+        self.user = user
+        // Extract Google name and avatar URL from metadata
+        var defaultName = ""
+        var defaultAvatarUrl = ""
+        if let anyJson = user.userMetadata["full_name"], case let .string(name) = anyJson {
+            defaultName = name
+        }
+        if let anyJson = user.userMetadata["avatar_url"], case let .string(url) = anyJson {
+            defaultAvatarUrl = url
+        }
+        _username = State(initialValue: defaultName)
+        _avatarUrl = State(initialValue: defaultAvatarUrl)
+    }
+
+    func saveProfile() async {
+        isSaving = true
+        errorMessage = nil
+        let userId = user.id.uuidString
+        let email = user.email ?? ""
+        let profile = UserProfile(
+            id: userId,
+            email: email,
+            username: username,
+            avatar_url: avatarUrl,
+            focus_goal: focusGoal,
+            interests: interests,
+            working_style: workingStyle,
+            session_pref_duration: sessionPrefDuration,
+            timezone: timezone,
+            availability: availability,
+            experience_level: experienceLevel
+        )
+        do {
+            // Upsert user profile (insert or update)
+            _ = try await SupabaseManager.shared.client.from("users").upsert(profile).execute()
+            await MainActor.run {
+                isSaving = false
+                onboardingState.showOnboarding = false
+            }
+        } catch {
+            await MainActor.run {
+                isSaving = false
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 32) {
+            if step == 0 {
+                VStack(alignment: .center, spacing: 20) {
+                    // Show Gmail profile image
+                    if let url = URL(string: avatarUrl), !avatarUrl.isEmpty {
+                        AsyncImage(url: url) { image in
+                            image.resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipShape(Circle())
+                        } placeholder: {
+                            ProgressView()
+                                .frame(width: 80, height: 80)
+                        }
+                    } else {
+                        Image(systemName: "person.crop.circle")
+                            .resizable()
+                            .frame(width: 80, height: 80)
+                            .foregroundColor(.gray)
+                    }
+                    Text("This is your Google profile image.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.bottom, 8)
+                    HStack {
+                        Image(systemName: "person.text.rectangle")
+                        TextField("Username", text: $username)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                    }
+                    Text("Pick a unique name for your profile. Defaulted to your Google name.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                    HStack {
+                        Image(systemName: "target")
+                        TextField("Focus Goal", text: $focusGoal)
+                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                    }
+                    Text("What do you want to accomplish in your next session?")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                }
+            } else if step == 1 {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack {
+                        Image(systemName: "tag")
+                        TextField("Interests (comma separated)", text: Binding(
+                            get: { interests.joined(separator: ", ") },
+                            set: { interests = $0.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+                        ))
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                    }
+                    Text("Add topics you care about (e.g., coding, design, writing).")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                    HStack {
+                        Image(systemName: "brain.head.profile")
+                        Picker("Working Style", selection: $workingStyle) {
+                            ForEach(workingStyles, id: \ .self) { style in
+                                Text(style)
+                            }
+                        }
+                        .pickerStyle(MenuPickerStyle())
+                    }
+                    Text("How do you like to work?")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                    HStack {
+                        Image(systemName: "timer")
+                        Stepper("Session Duration: \(sessionPrefDuration) min", value: $sessionPrefDuration, in: 15...120, step: 5)
+                    }
+                    Text("Choose your preferred session length.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                }
+            } else if step == 2 {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack {
+                        Image(systemName: "globe")
+                        Picker("Timezone", selection: $timezone) {
+                            ForEach(timezones, id: \ .self) { tz in
+                                Text(tz)
+                            }
+                        }
+                        .pickerStyle(MenuPickerStyle())
+                    }
+                    Text("Select your timezone for better matching.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                    HStack {
+                        Image(systemName: "calendar")
+                        Picker("Availability", selection: $availability) {
+                            ForEach(availabilityOptions, id: \ .self) { slot in
+                                Text(slot)
+                            }
+                        }
+                        .pickerStyle(MenuPickerStyle())
+                    }
+                    Text("When are you usually available to work?")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                    HStack {
+                        Image(systemName: "star")
+                        Picker("Experience Level", selection: $experienceLevel) {
+                            ForEach(experienceLevels, id: \ .self) { level in
+                                Text(level)
+                            }
+                        }
+                        .pickerStyle(SegmentedPickerStyle())
+                    }
+                    Text("How experienced are you in your field?")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 12)
+                }
+            }
+            Spacer()
+            if let errorMessage = errorMessage {
+                Text(errorMessage)
+                    .foregroundColor(.red)
+            }
+            if isSaving {
+                ProgressView("Saving...")
+            }
+            HStack {
+                if step > 0 {
+                    Button("Back") { step -= 1 }
+                        .padding()
+                }
+                Spacer()
+                if step < 2 {
+                    Button("Next") { step += 1 }
+                        .padding()
+                } else {
+                    Button("Finish") {
+                        Task { await saveProfile() }
+                    }
+                    .padding()
+                    .disabled(isSaving)
+                }
+            }
+        }
+        .padding()
+        .navigationTitle("Onboarding")
+    }
+}
+
+class OnboardingState: ObservableObject {
+    @Published var showOnboarding: Bool = true
+}
+
 struct ContentView: View {
     @StateObject private var authVM = AuthViewModel()
+    @StateObject private var onboardingState = OnboardingState()
 
     var body: some View {
         NavigationStack {
             if let user = authVM.user {
-                MainView(user: user)
+                if onboardingState.showOnboarding {
+                    OnboardingView(user: user)
+                        .environmentObject(onboardingState)
+                } else {
+                    MainView(user: user)
+                }
             } else {
                 ZStack {
                     Color(.systemBackground).ignoresSafeArea()

@@ -6,8 +6,8 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 
 ## 📌 MVP Feature Overview
 
-- 🔐 User Authentication (Email, Apple Sign-In)
-- 🎯 Profile creation with goals/interests
+- ✅ User Authentication (Google Sign-In via Supabase, fully implemented)
+- 🎯 Profile creation with goals/interests (Onboarding branch created, UI and Supabase integration next)
 - 🤝 Matchmaking with real-time availability
 - 🎙️ In-app 1:1 voice call
 - ⏱️ Timer-based sessions (e.g., 25/50 min)
@@ -18,131 +18,176 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 
 ## 🧱 Stack Overview
 
-| Layer | Tech Stack |
-|-------|------------|
-| **Frontend** | SwiftUI (iOS), Combine |
-| **Backend** | Supabase (PostgreSQL, Auth, Edge Functions, Realtime) |
-| **Voice SDK** | Twilio Voice / Agora / Daily.co (Pick 1) |
-| **Storage** | Supabase Storage (user avatars etc.) |
-| **DevOps** | Xcode, Git, TestFlight, App Store Connect |
+| Layer        | Tech Stack                                                  |
+|--------------|-------------------------------------------------------------|
+| **Frontend** | SwiftUI (iOS), Combine                                      |
+| **Backend**  | Supabase (PostgreSQL, Auth, Edge Functions, Realtime)      |
+| **Voice SDK**| Twilio Voice / Agora / Daily.co (Pick 1)                    |
+| **Storage**  | Supabase Storage (user avatars etc.)                        |
+| **DevOps**   | Xcode, Git, TestFlight, App Store Connect                   |
 
 ---
 
 ## 📐 Database Schema (Supabase)
 
 ### `users`
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary Key |
-| email | Text | Unique |
-| username | Text | Display name |
-| interests | Text[] | Array of interest tags |
-| is_available | Boolean | True = looking for session |
-| current_session_id | UUID | FK to `sessions.id` |
-| created_at | Timestamp | — |
+
+| Field                  | Type                      | Description                                 |
+|------------------------|---------------------------|---------------------------------------------|
+| id                     | UUID                      | Primary Key                                 |
+| email                  | Text                      | Unique (from Supabase Auth)                 |
+| username               | Text                      | Display name or nickname                    |
+| avatar_url             | Text                      | Profile picture URL                         |
+| focus_goal             | Text                      | Short description of current work goal      |
+| interests              | Text[]                    | Interest tags (multi-select)                |
+| working_style          | Text                      | e.g., Deep focus, Pomodoro, Chatty          |
+| session_pref_duration  | Integer                   | Preferred session length in minutes         |
+| timezone               | Text                      | e.g., Asia/Kolkata                          |
+| availability           | JSON                      | Time blocks (optional MVP)                  |
+| experience_level       | Text                      | Beginner / Intermediate / Expert            |
+| is_available           | Boolean                   | Real-time status for matchmaking            |
+| current_session_id     | UUID                      | FK to `sessions.id`                         |
+| created_at             | Timestamp with time zone  | Default: `now()`                            |
+
+---
 
 ### `sessions`
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary Key |
-| user1_id | UUID | FK to `users.id` |
-| user2_id | UUID | FK to `users.id` |
-| start_time | Timestamp | UTC |
-| end_time | Timestamp | UTC |
-| status | Text | 'active' / 'completed' / 'cancelled' |
+
+| Field             | Type                      | Description                          |
+|------------------|---------------------------|--------------------------------------|
+| id               | UUID                      | Primary Key                          |
+| user1_id         | UUID                      | FK to `users.id`                     |
+| user2_id         | UUID                      | FK to `users.id`                     |
+| start_time       | Timestamp with time zone  | UTC                                  |
+| end_time         | Timestamp with time zone  | UTC                                  |
+| status           | Text                      | 'active' / 'completed' / 'cancelled' |
+| duration_minutes | Integer                   | Optional, duration in minutes        |
+| voice_room_id    | Text                      | Used by voice SDK                    |
+| created_at       | Timestamp with time zone  | Default: `now()`                     |
+
+---
 
 ### `feedback` _(optional)_
-| Field | Type | Description |
-|-------|------|-------------|
-| id | UUID | Primary Key |
-| session_id | UUID | FK to `sessions.id` |
-| submitted_by | UUID | FK to `users.id` |
-| rating | Integer | 1–5 |
-| comment | Text | Free text |
+
+| Field         | Type                      | Description                  |
+|---------------|---------------------------|------------------------------|
+| id            | UUID                      | Primary Key                  |
+| session_id    | UUID                      | FK to `sessions.id`          |
+| submitted_by  | UUID                      | FK to `users.id`             |
+| rating        | Integer                   | 1–5                          |
+| comment       | Text                      | Free text comment            |
+| created_at    | Timestamp with time zone  | Default: `now()`             |
 
 ---
 
 ## ⚙️ Supabase Setup
 
 - [x] Create project on Supabase
-- [x] Enable Email and Apple Sign-in
-- [x] Setup tables (`users`, `sessions`, optionally `feedback`)
-- [x] Configure RLS policies for:
-  - Users can only update their own data
-  - Only session participants can read/write to session
+- [x] Enable Google Sign-in (fully working, tested in app)
+- [ ] Enable Apple Sign-in (not implemented yet)
+- [x] Setup tables: `users`, `sessions`, `feedback` (optional)
+- [x] Configure RLS (Row-Level Security) policies:
+  - Users can only update their own records
+  - Users can only see sessions/feedback they’re part of
 - [x] Enable Realtime on `users` and `sessions`
-- [x] Create edge function (e.g., `matchmake.ts`) for pairing logic
+- [x] Create Edge Functions (e.g., `matchmake.ts`) to handle session pairing
 
 ---
 
 ## 🔧 Core Features Implementation Plan
 
 ### ✅ Authentication
-- Swift Package: `Supabase/Auth`
-- Handle login, signup, session restore
-- Store session token securely
+- Use `@supabase/supabase-swift`
+- Google login with secure session handling (fully implemented)
+- Store session token in Keychain
+- Only Google sign-in is implemented for now (Apple sign-in pending)
 
-### 👤 Onboarding/Profile Setup
-- Collect: username, interests (multi-select), working style
-- Upload to Supabase `users` table
+---
+
+### 👤 Onboarding / Profile Setup
+
+**Next up:**
+- Onboarding branch created (`feature/onboarding`)
+- Will collect the following from the user after authentication:
+
+| Step | Field                  | Input Type                       |
+|------|------------------------|----------------------------------|
+| 1    | `username`             | Text                             |
+| 2    | `avatar_url`           | Image upload (Supabase Storage)  |
+| 3    | `focus_goal`           | Short text input                 |
+| 4    | `interests`            | Multi-select chips or tags       |
+| 5    | `working_style`        | Single select (deep, chatty, etc.)|
+| 6    | `session_pref_duration`| Number picker (25/50/etc)        |
+| 7    | `timezone`             | Auto-detect or dropdown          |
+| 8    | `availability`         | (Optional) Calendar/time slots   |
+| 9    | `experience_level`     | Beginner / Intermediate / Expert |
+
+- Then insert into Supabase `users` table.
+
+---
 
 ### 🔄 Matchmaking Logic
 - User taps “Find Partner”
-- Check for available users with similar interests (`is_available = true`)
+- Search `users` where `is_available = true` and match tags/timezone
 - If match found:
-  - Create session in `sessions` table
-  - Update both users’ `is_available = false`
-  - Set `current_session_id`
-- If no match: wait or retry
+  - Create new `session`
+  - Set both users' `is_available = false`
+  - Set their `current_session_id` to session ID
+- If no match:
+  - Poll or wait with retry mechanism
+
+---
 
 ### 🎙️ Voice Call (Pick One)
+
 #### Option A: **Twilio Voice**
 - Twilio Programmable Voice SDK
-- Generate Access Token (via Supabase Function)
-- Create room with two participants
+- Access tokens generated via Supabase Edge Function
 
 #### Option B: **Agora**
 - Use Agora iOS SDK
-- Create channel per session (`session:id`)
-- Manage join/leave via tokens
+- Create session-specific channel
 
 #### Option C: **Daily.co**
-- WebRTC via Daily Swift SDK
-- Simple integration + browser fallback
+- Daily Swift SDK
+- Lightweight WebRTC
+
+---
 
 ### ⏱️ Session Timer
-- Start timer when call connects
-- Auto-disconnect after N minutes
-- Cleanup: mark users as available, clear `current_session_id`, set session status
+- Start timer when session begins
+- Disconnect automatically when timer ends
+- Update `session.status = completed`, reset user states
 
 ---
 
 ## 🧪 Testing Plan
 
-| Component | Test |
-|----------|------|
-| Auth | Signup/login/logout workflows |
-| Matchmaking | Simulate 2+ users finding partners |
-| Timer | Auto disconnect logic |
-| Voice | End-to-end call setup/teardown |
-| Realtime | UI updates on user/session changes |
+| Component     | Tests                                 |
+|---------------|----------------------------------------|
+| Auth          | Sign up, sign in, session restore      |
+| Onboarding    | Validate and insert profile data       |
+| Matchmaking   | User pairing logic + edge cases        |
+| Sessions      | Timer, cleanup, status transitions     |
+| Voice         | Join, leave, failover handling         |
+| Realtime      | Reflect live status + session state    |
 
 ---
 
 ## 🎨 Future Enhancements
 
-- 🔁 Re-match with past partner
-- 🔔 Push Notifications (e.g., session reminders)
-- 🌎 Language filters / regional match
-- 🧠 AI-based matching by personality
-- 📊 User productivity analytics
-- 💬 Text-based chat during session
+- 🔁 Re-match with previous partners
+- 🔔 Push notifications (e.g., session reminders)
+- 🌍 Match based on language, region, or timezone
+- 🤖 AI-based smart pairing
+- 📈 User productivity insights or streaks
+- 💬 Optional in-session chat
 
 ---
 
-## 🗂 File/Folder Structure Suggestion
+## 🗂 Suggested Folder Structure
 
-📁 FindMyPartnerApp
+📁 VibinWorkApp
 ├── 📁 Models
 ├── 📁 Views
 ├── 📁 ViewModels
@@ -157,35 +202,34 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 ├── 📄 App.swift
 └── 📄 Info.plist
 
-
 ---
 
 ## 📦 Packages To Add
 
 - `@supabase/supabase-swift`
 - `TwilioVoice` or `AgoraRtcKit` or `DailySwift`
-- `CombineExt` (for publishers/operators)
-- `SwiftLint` for code quality
+- `CombineExt` for reactive patterns
+- `SwiftLint` for linting and clean code
 
 ---
 
 ## 🚀 Launch Checklist
 
-- [ ] Complete core session flow
-- [ ] Test end-to-end with multiple users
-- [ ] Beta test via TestFlight
-- [ ] Add App Store screenshots, privacy policy, app icons
-- [ ] Submit for review
+- [x] Complete authentication (Google sign-in)
+- [ ] Complete onboarding → match → call flow
+- [ ] Run end-to-end manual tests
+- [ ] Push to TestFlight and gather feedback
+- [ ] Add App Store metadata (screenshots, privacy, icons)
+- [ ] Submit for App Store review
 
 ---
 
 ## 🧠 Notes
 
-- All session logic must be server-verified (no client-side trust)
-- Consider Supabase Functions to handle matchmaking or cleanups
-- Use Supabase Realtime to listen to session state updates
+- Always validate session start/end server-side via Edge Functions
+- Use Supabase Realtime listeners to live update session & user state
+- Store call room IDs for debug/logging
 
 ---
 
-> 💬 *“Build focused, together.”*
-
+> 💬 _“Build focused, together.”_
