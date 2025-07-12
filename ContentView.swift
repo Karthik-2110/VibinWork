@@ -64,6 +64,7 @@ struct UserProfile: Decodable, Encodable {
     let timezone: String?
     let availability: String?
     let experience_level: String?
+    let is_available: Bool?
 }
 
 struct MainView: View {
@@ -115,6 +116,8 @@ struct MatchLoadingView: View {
     @State private var foundPartner: UserProfile? = nil
     @State private var error: String? = nil
     @State private var searchTask: Task<Void, Never>? = nil
+    @State private var partnerUnavailable = false
+    @State private var partnerPollingTask: Task<Void, Never>? = nil
 
     var body: some View {
         VStack(spacing: 32) {
@@ -124,6 +127,18 @@ struct MatchLoadingView: View {
                 Text("Found partner: \(found.username ?? "Unknown")")
                     .font(.title2)
                     .fontWeight(.medium)
+                if partnerUnavailable {
+                    Text("Partner left, searching again...")
+                        .foregroundColor(.orange)
+                        .onAppear {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                foundPartner = nil
+                                partnerUnavailable = false
+                                isSearching = false
+                                searchTask = Task { await startMatching() }
+                            }
+                        }
+                }
             } else {
                 Text("Looking for a partner...")
                     .font(.title2)
@@ -136,7 +151,6 @@ struct MatchLoadingView: View {
             Button("Cancel") {
                 Task {
                     if let user = authVM.user {
-                        // Set is_available to false on cancel
                         try? await SupabaseManager.shared.client
                             .from("users")
                             .update(["is_available": false])
@@ -145,6 +159,7 @@ struct MatchLoadingView: View {
                     }
                     isPresented = false
                     searchTask?.cancel()
+                    partnerPollingTask?.cancel()
                 }
             }
             .foregroundColor(.red)
@@ -161,6 +176,7 @@ struct MatchLoadingView: View {
         }
         .onDisappear {
             searchTask?.cancel()
+            partnerPollingTask?.cancel()
         }
     }
 
@@ -185,8 +201,8 @@ struct MatchLoadingView: View {
                 if let partner = try? JSONDecoder().decode([UserProfile].self, from: response.data).first {
                     await MainActor.run {
                         foundPartner = partner
-                        // For now, just print partner info
                         print("Found partner: \(partner)")
+                        startPollingPartnerAvailability(partnerId: partner.id)
                     }
                     break
                 } else {
@@ -196,6 +212,33 @@ struct MatchLoadingView: View {
         } catch {
             await MainActor.run {
                 self.error = error.localizedDescription
+            }
+        }
+    }
+
+    func startPollingPartnerAvailability(partnerId: String) {
+        partnerPollingTask?.cancel()
+        partnerPollingTask = Task {
+            while !Task.isCancelled {
+                do {
+                    let response = try await SupabaseManager.shared.client
+                        .from("users")
+                        .select()
+                        .eq("id", value: partnerId)
+                        .single()
+                        .execute()
+                    if let partner = try? JSONDecoder().decode(UserProfile.self, from: response.data),
+                       let isAvailable = partner.is_available,
+                       !isAvailable {
+                        await MainActor.run {
+                            partnerUnavailable = true
+                        }
+                        break
+                    }
+                } catch {
+                    // Ignore errors, just retry
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             }
         }
     }
@@ -264,7 +307,8 @@ struct OnboardingView: View {
             session_pref_duration: sessionPrefDuration,
             timezone: timezone,
             availability: availability,
-            experience_level: experienceLevel
+            experience_level: experienceLevel,
+            is_available: nil // This will be updated by the backend
         )
         do {
             // Upsert user profile (insert or update)
