@@ -110,15 +110,42 @@ struct MainView: View {
 
 struct MatchLoadingView: View {
     @Binding var isPresented: Bool
+    @EnvironmentObject var authVM: AuthViewModel
+    @State private var isSearching = false
+    @State private var foundPartner: UserProfile? = nil
+    @State private var error: String? = nil
+    @State private var searchTask: Task<Void, Never>? = nil
+
     var body: some View {
         VStack(spacing: 32) {
             ProgressView()
                 .scaleEffect(2)
-            Text("Looking for a partner...")
-                .font(.title2)
-                .fontWeight(.medium)
+            if let found = foundPartner {
+                Text("Found partner: \(found.username ?? "Unknown")")
+                    .font(.title2)
+                    .fontWeight(.medium)
+            } else {
+                Text("Looking for a partner...")
+                    .font(.title2)
+                    .fontWeight(.medium)
+            }
+            if let error = error {
+                Text(error)
+                    .foregroundColor(.red)
+            }
             Button("Cancel") {
-                isPresented = false
+                Task {
+                    if let user = authVM.user {
+                        // Set is_available to false on cancel
+                        try? await SupabaseManager.shared.client
+                            .from("users")
+                            .update(["is_available": false])
+                            .eq("id", value: user.id.uuidString)
+                            .execute()
+                    }
+                    isPresented = false
+                    searchTask?.cancel()
+                }
             }
             .foregroundColor(.red)
             .padding(.top, 24)
@@ -126,6 +153,51 @@ struct MatchLoadingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemBackground).opacity(0.95))
         .ignoresSafeArea()
+        .onAppear {
+            if !isSearching {
+                isSearching = true
+                searchTask = Task { await startMatching() }
+            }
+        }
+        .onDisappear {
+            searchTask?.cancel()
+        }
+    }
+
+    func startMatching() async {
+        guard let user = authVM.user else { return }
+        do {
+            // 1. Mark current user as available
+            try await SupabaseManager.shared.client
+                .from("users")
+                .update(["is_available": true])
+                .eq("id", value: user.id.uuidString)
+                .execute()
+            // 2. Poll for available partners
+            while !Task.isCancelled {
+                let response = try await SupabaseManager.shared.client
+                    .from("users")
+                    .select()
+                    .eq("is_available", value: true)
+                    .neq("id", value: user.id.uuidString)
+                    .limit(1)
+                    .execute()
+                if let partner = try? JSONDecoder().decode([UserProfile].self, from: response.data).first {
+                    await MainActor.run {
+                        foundPartner = partner
+                        // For now, just print partner info
+                        print("Found partner: \(partner)")
+                    }
+                    break
+                } else {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.error = error.localizedDescription
+            }
+        }
     }
 }
 
@@ -377,6 +449,7 @@ struct ContentView: View {
             if let user = authVM.user {
                 ProfileCheckView(user: user)
                     .environmentObject(onboardingState)
+                    .environmentObject(authVM)
             } else {
                 ZStack {
                     Color(.systemBackground).ignoresSafeArea()
