@@ -91,7 +91,7 @@ struct Session: Codable, Identifiable {
     let created_at: String? // ISO8601 string, set by Supabase
 }
 
-struct Room: Codable, Identifiable, Equatable {
+struct Room: Codable, Identifiable, Equatable, Hashable {
     let id: String
     let host_id: String
     let max_participants: Int
@@ -99,6 +99,7 @@ struct Room: Codable, Identifiable, Equatable {
     let created_at: String?
     let room_name: String?
     let timer_minutes: Int?
+    let session_started_epoch: Int64?
 }
 
 struct RoomParticipant: Codable, Identifiable {
@@ -273,15 +274,77 @@ struct CreateRoomView: View {
 struct SessionView: View {
     let room: Room
     let participantsCount: Int
+    @State private var remainingSeconds: Int = 0
+    @State private var timer: Timer? = nil
+    @State private var parseError: Bool = false
+    @StateObject private var voiceService = VoiceService()
+
     var body: some View {
         VStack(spacing: 24) {
             Text("Session in Progress").font(.largeTitle).fontWeight(.bold)
             Text("Room: \(room.room_name ?? "Unnamed Room")")
             Text("Timer: \(room.timer_minutes ?? 0) min")
             Text("Participants: \(participantsCount)/\(room.max_participants)")
-            // Add more session UI here
+            if parseError {
+                Text("Timer error: could not get start time.")
+                    .foregroundColor(.red)
+            } else if remainingSeconds > 0 {
+                Text("Time Left: \(formatTime(remainingSeconds))")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+            } else {
+                Text("Session Complete!")
+                    .font(.title2)
+                    .foregroundColor(.green)
+            }
+            
+            Button(action: {
+                voiceService.toggleMute()
+            }) {
+                Image(systemName: voiceService.isMuted ? "mic.slash.fill" : "mic.fill")
+                    .font(.title)
+            }
+            .padding()
         }
         .padding()
+        .onAppear {
+            startCountdown()
+            voiceService.joinChannel(room: room)
+        }
+        .onDisappear {
+            timer?.invalidate()
+            voiceService.leaveChannel()
+        }
+    }
+
+    private func startCountdown() {
+        guard let startEpoch = room.session_started_epoch, let duration = room.timer_minutes else {
+            parseError = true
+            print("[Timer] session_started_epoch or duration missing")
+            return
+        }
+        let endEpoch = startEpoch + Int64(duration * 60)
+        updateRemaining(endEpoch: endEpoch)
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            updateRemaining(endEpoch: endEpoch)
+        }
+    }
+
+    private func updateRemaining(endEpoch: Int64) {
+        let nowEpoch = Int64(Date().timeIntervalSince1970)
+        let remaining = Int(endEpoch - nowEpoch)
+        if remaining > 0 {
+            remainingSeconds = remaining
+        } else {
+            remainingSeconds = 0
+            timer?.invalidate()
+        }
+    }
+
+    private func formatTime(_ seconds: Int) -> String {
+        let m = seconds / 60
+        let s = seconds % 60
+        return String(format: "%02d:%02d", m, s)
     }
 }
 
@@ -295,12 +358,13 @@ struct HostWaitingRoomView: View {
     @State private var autoStartTimer: Timer? = nil
     @State private var secondsLeft: Int = 180
     @State private var roomStatus: String = "open"
+    @State private var sessionRoom: Room?
     @EnvironmentObject var authVM: AuthViewModel
     @Environment(\.presentationMode) var presentationMode
 
     var body: some View {
-        if roomStatus == "in_session" {
-            SessionView(room: room, participantsCount: participants.count)
+        if roomStatus == "in_session", let startedRoom = sessionRoom {
+            SessionView(room: startedRoom, participantsCount: participants.count)
         } else {
             VStack(spacing: 20) {
                 Text("Room: \(room.room_name ?? "")")
@@ -367,20 +431,30 @@ struct HostWaitingRoomView: View {
         autoStartTimer = nil
         Task {
             do {
-                let updates: [String: AnyEncodable] = [
-                    "status": AnyEncodable("in_session")
+                let nowEpoch = Int64(Date().timeIntervalSince1970)
+                let updatePayload: [String: AnyEncodable] = [
+                    "status": AnyEncodable("in_session"),
+                    "session_started_epoch": AnyEncodable(nowEpoch)
                 ]
-                _ = try await SupabaseManager.shared.client
+                print("[DEBUG] Updating room \(room.id) with payload: \(updatePayload)")
+                let response = try await SupabaseManager.shared.client
                     .from("rooms")
-                    .update(updates)
+                    .update(updatePayload)
                     .eq("id", value: room.id)
+                    .select()
+                    .single()
                     .execute()
+                let decodedRoom = try JSONDecoder().decode(Room.self, from: response.data)
+                print("[DEBUG] Supabase update response: \(response)")
                 await MainActor.run {
-                    sessionStarted = true
+                    self.sessionRoom = decodedRoom
+                    self.isStarting = false
+                    self.roomStatus = "in_session"
                 }
             } catch {
+                print("[DEBUG] Error updating room: \(error)")
                 await MainActor.run {
-                    self.error = error.localizedDescription
+                    self.error = "Failed to start session: \(error.localizedDescription)"
                     self.isStarting = false
                 }
             }
@@ -426,6 +500,7 @@ struct HostWaitingRoomView: View {
         RealtimeManager.shared.subscribeToRoomStatus(roomId: room.id) { updatedRoom in
             DispatchQueue.main.async {
                 self.roomStatus = updatedRoom.status
+                self.sessionRoom = updatedRoom
             }
         }
     }
@@ -1307,7 +1382,7 @@ struct JoinRoomListView: View {
             .navigationTitle("Join a Room")
             .onAppear { fetchRooms() }
             .sheet(item: $selectedRoom) { room in
-                JoinRoomDetailsView(room: room)
+                JoinRoomDetailsView(room: room, isPresented: $selectedRoom)
                     .environmentObject(authVM)
             }
         }
@@ -1364,20 +1439,24 @@ struct ParticipantRow: View {
 
 struct JoinRoomDetailsView: View {
     let room: Room
-    @EnvironmentObject var authVM: AuthViewModel
-    @Environment(\.presentationMode) var presentationMode
-    @State private var participants: [UserProfile] = []
+    @Binding var isPresented: Room?
+    @State private var joined = false
+    @State private var participants: [UserProfile] = [] // This should include host
     @State private var isLoading = false
     @State private var error: String? = nil
     @State private var isJoining = false
-    @State private var joined = false
+    @State private var isStarting = false
+    @State private var sessionStarted = false
     @State private var waitingForHost = false
     @State private var roomStatus: String = "open"
+    @State private var sessionRoom: Room?
     @State private var hostProfile: UserProfile? = nil
-    // ... existing code ...
+    @EnvironmentObject var authVM: AuthViewModel
+    @Environment(\.presentationMode) var presentationMode
+
     var body: some View {
-        if roomStatus == "in_session" {
-            SessionView(room: room, participantsCount: participants.count)
+        if roomStatus == "in_session", let startedRoom = sessionRoom {
+            SessionView(room: startedRoom, participantsCount: participants.count + 1)
         } else {
             VStack {
                 if isLoading {
@@ -1503,6 +1582,7 @@ struct JoinRoomDetailsView: View {
             DispatchQueue.main.async {
                 print("[Joiner] Room status update: \(updatedRoom.status)")
                 self.roomStatus = updatedRoom.status
+                self.sessionRoom = updatedRoom
             }
         }
     }

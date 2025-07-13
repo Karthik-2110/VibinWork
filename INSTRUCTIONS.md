@@ -1,18 +1,23 @@
 # 🧑‍🤝‍🧑 VibinWork — iOS App
 
-An iOS productivity app that matches users for real-time, one-on-one, timed co-working sessions with similar interests. Built using SwiftUI, Supabase, and integrated with a voice SDK (Agora).
+An iOS productivity app for real-time, timed co-working sessions in user-created rooms. Built using SwiftUI and Supabase.
 
 ---
 
 ## 📌 MVP Feature Overview
 
-- ✅ User Authentication (Google Sign-In via Supabase, fully implemented)
-- ✅ Profile creation with goals/interests (Onboarding flow implemented, data saved to Supabase)
-- 🤝 Matchmaking with real-time availability
-- 🎙️ In-app 1:1 voice call
-- ⏱️ Timer-based sessions (e.g., 25/50 min)
-- ✅ Session end cleanup (disconnect + free up users)
-- 🗒️ (Optional) Post-session feedback
+- ✅ **User Authentication:** Google Sign-In via Supabase.
+- ✅ **Profile Creation:** Onboarding flow to collect user details.
+- ✅ **Room-Based Sessions:**
+    - Create rooms with custom names, participant limits, and timer durations.
+    - Browse and join existing open rooms.
+- ✅ **Real-Time Waiting Room:**
+    - Host and participants wait in a lobby.
+    - Participant list updates in real-time for everyone.
+- ✅ **Synchronized Session Timer:**
+    - Host starts the session for all participants.
+    - A shared, robust timer keeps everyone in sync, regardless of timezone.
+- 🎙️ **In-app Voice Call:** (Next Step) Integration with a voice SDK.
 
 ---
 
@@ -21,8 +26,8 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 | Layer        | Tech Stack                                                  |
 |--------------|-------------------------------------------------------------|
 | **Frontend** | SwiftUI (iOS), Combine                                      |
-| **Backend**  | Supabase (PostgreSQL, Auth, Edge Functions, Realtime)       |
-| **Voice SDK**|  Agora                                                      |
+| **Backend**  | Supabase (PostgreSQL, Auth, Realtime)                       |
+| **Voice SDK**|  TBD (e.g., Agora, Twilio)                                  |
 | **Storage**  | Supabase Storage (user avatars etc.)                        |
 | **DevOps**   | Xcode, Git, TestFlight, App Store Connect                   |
 
@@ -34,196 +39,119 @@ An iOS productivity app that matches users for real-time, one-on-one, timed co-w
 
 | Field                  | Type                      | Description                                 |
 |------------------------|---------------------------|---------------------------------------------|
-| id                     | UUID                      | Primary Key                                 |
-| email                  | Text                      | Unique (from Supabase Auth)                 |
-| username               | Text                      | Display name or nickname                    |
+| id                     | UUID                      | Primary Key (from Supabase Auth)            |
+| email                  | Text                      | Unique                                      |
+| username               | Text                      | Display name                                |
 | avatar_url             | Text                      | Profile picture URL                         |
 | focus_goal             | Text                      | Short description of current work goal      |
-| interests              | Text[]                    | Interest tags (multi-select)                |
-| working_style          | Text                      | e.g., Deep focus, Pomodoro, Chatty          |
-| session_pref_duration  | Integer                   | Preferred session length in minutes         |
-| timezone               | Text                      | e.g., Asia/Kolkata                          |
-| availability           | JSON                      | Time blocks (optional MVP)                  |
-| experience_level       | Text                      | Beginner / Intermediate / Expert            |
-| is_available           | Boolean                   | Real-time status for matchmaking            |
-| current_session_id     | UUID                      | FK to `sessions.id`                         |
+| ... (other fields)     | ...                       | ...                                         |
 | created_at             | Timestamp with time zone  | Default: `now()`                            |
 
----
+### `rooms`
 
-### `sessions`
+| Field                   | Type                      | Description                                     |
+|-------------------------|---------------------------|-------------------------------------------------|
+| id                      | UUID                      | Primary Key                                     |
+| host_id                 | UUID                      | FK to `users.id`                                |
+| max_participants        | Integer                   | Maximum number of users allowed in the room     |
+| status                  | Text                      | 'open' / 'in_session' / 'completed'             |
+| room_name               | Text                      | Custom name for the room                        |
+| timer_minutes           | Integer                   | Session duration in minutes                     |
+| session_started_epoch   | BigInt                    | UNIX epoch (UTC seconds) for synchronized timer |
+| created_at              | Timestamp with time zone  | Default: `now()`                                |
 
-| Field             | Type                      | Description                          |
-|------------------|---------------------------|--------------------------------------|
-| id               | UUID                      | Primary Key                          |
-| user1_id         | UUID                      | FK to `users.id`                     |
-| user2_id         | UUID                      | FK to `users.id`                     |
-| start_time       | Timestamp with time zone  | UTC                                  |
-| end_time         | Timestamp with time zone  | UTC                                  |
-| status           | Text                      | 'active' / 'completed' / 'cancelled' |
-| duration_minutes | Integer                   | Optional, duration in minutes        |
-| voice_room_id    | Text                      | Used by voice SDK                    |
-| created_at       | Timestamp with time zone  | Default: `now()`                     |
+### `room_participants`
 
----
-
-### `feedback` _(optional)_
-
-| Field         | Type                      | Description                  |
-|---------------|---------------------------|------------------------------|
-| id            | UUID                      | Primary Key                  |
-| session_id    | UUID                      | FK to `sessions.id`          |
-| submitted_by  | UUID                      | FK to `users.id`             |
-| rating        | Integer                   | 1–5                          |
-| comment       | Text                      | Free text comment            |
-| created_at    | Timestamp with time zone  | Default: `now()`             |
+| Field      | Type                      | Description              |
+|------------|---------------------------|--------------------------|
+| id         | UUID                      | Primary Key              |
+| room_id    | UUID                      | FK to `rooms.id`         |
+| user_id    | UUID                      | FK to `users.id`         |
+| joined_at  | Timestamp with time zone  | Default: `now()`         |
 
 ---
 
 ## ⚙️ Supabase Setup
 
-- [x] Create project on Supabase
-- [x] Enable Google Sign-in (fully working, tested in app)
-- [ ] Enable Apple Sign-in (not implemented yet)
-- [x] Setup tables: `users`, `sessions`, `feedback` (optional)
-- [x] Configure RLS (Row-Level Security) policies:
-  - Users can only update their own records
-  - Users can only see sessions/feedback they’re part of
-- [x] Enable Realtime on `users` and `sessions`
-- [x] Create Edge Functions (e.g., `matchmake.ts`) to handle session pairing
+- ✅ **Project Creation:** Project is live on Supabase.
+- ✅ **Authentication:** Google Sign-in is enabled and integrated.
+- ✅ **Database Tables:**
+  - `users` table is set up.
+  - `rooms` and `room_participants` tables are created and in use.
+- ✅ **Row-Level Security (RLS):**
+  - Basic policies are in place. Users can update their own records.
+- ✅ **Realtime:**
+  - Enabled on `rooms` and `room_participants` to power the live waiting room and session start.
 
 ---
 
 ## 🔧 Core Features Implementation Plan
 
 ### ✅ Authentication
-- Use `@supabase/supabase-swift`
-- Google login with secure session handling (fully implemented)
-- Store session token in Keychain
-- Only Google sign-in is implemented for now (Apple sign-in pending)
+- Uses `@supabase/supabase-swift`.
+- Secure Google login and session handling is fully implemented.
 
 ---
 
 ### ✅ Onboarding / Profile Setup
-
-- Onboarding flow is live and collects:
-  - Username (auto-filled from Google)
-  - Google profile image (avatar)
-  - Focus goal
-  - Interests (multi-select)
-  - Working style (dropdown)
-  - Session preferred duration (picker)
-  - Timezone (dropdown, default Asia/Kolkata)
-  - Availability (dropdown)
-  - Experience level (dropdown)
-- Data is saved to the Supabase `users` table on completion.
+- A multi-step onboarding flow collects user profile information.
+- Data is saved to the Supabase `users` table upon completion.
 
 ---
 
-### 🔄 Matchmaking Logic
-- User taps “Find Partner”
-- Search `users` where `is_available = true` and match tags/timezone
-- If match found:
-  - Create new `session`
-  - Set both users' `is_available = false`
-  - Set their `current_session_id` to session ID
-- If no match:
-  - Poll or wait with retry mechanism
+### ✅ Room & Session Flow
+- **Create Room:** Users can create a new room, setting a name, participant limit, and timer duration.
+- **Join Room:** Users can see a list of `open` rooms and join them.
+- **Waiting Room (Host View):** The host sees participants join in real-time and can manually start the session.
+- **Waiting Room (Joiner View):** Participants see who is in the room and wait for the host to begin.
+- **Real-time Updates:** A `RealtimeManager` handles Supabase Realtime subscriptions to keep room status and participant lists synchronized.
 
 ---
 
-### 🎙️ Voice Call (Pick One)
-
-#### Option A: **Twilio Voice**
-- Twilio Programmable Voice SDK
-- Access tokens generated via Supabase Edge Function
-
-#### Option B: **Agora**
-- Use Agora iOS SDK
-- Create session-specific channel
-
-#### Option C: **Daily.co**
-- Daily Swift SDK
-- Lightweight WebRTC
+### ✅ Session Timer
+- When the host starts the session, a `session_started_epoch` (UNIX timestamp) is saved to the `rooms` table.
+- All clients use this epoch value to initialize a synchronized countdown timer.
+- This approach is robust and works accurately across all timezones.
 
 ---
 
-### ⏱️ Session Timer
-- Start timer when session begins
-- Disconnect automatically when timer ends
-- Update `session.status = completed`, reset user states
+### 🎙️ Voice Call (Next Step)
+- The next major feature is to integrate a voice SDK (e.g., Agora, Twilio) for in-session communication.
 
 ---
 
 ## 🧪 Testing Plan
 
-| Component     | Tests                                 |
-|---------------|----------------------------------------|
-| Auth          | Sign up, sign in, session restore      |
-| Onboarding    | Validate and insert profile data       |
-| Matchmaking   | User pairing logic + edge cases        |
-| Sessions      | Timer, cleanup, status transitions     |
-| Voice         | Join, leave, failover handling         |
-| Realtime      | Reflect live status + session state    |
-
----
-
-## 🎨 Future Enhancements
-
-- 🔁 Re-match with previous partners
-- 🔔 Push notifications (e.g., session reminders)
-- 🌍 Match based on language, region, or timezone
-- 🤖 AI-based smart pairing
-- 📈 User productivity insights or streaks
-- 💬 Optional in-session chat
-
----
-
-## 🗂 Suggested Folder Structure
-
-📁 VibinWorkApp
-├── 📁 Models
-├── 📁 Views
-├── 📁 ViewModels
-├── 📁 Services
-│ ├── SupabaseManager.swift
-│ ├── Matchmaker.swift
-│ └── VoiceService.swift
-├── 📁 Components
-│ ├── TimerView.swift
-│ ├── MatchLoadingView.swift
-│ └── SessionCard.swift
-├── 📄 App.swift
-└── 📄 Info.plist
-
----
-
-## 📦 Packages To Add
-
-- `@supabase/supabase-swift`
-- `TwilioVoice` or `AgoraRtcKit` or `DailySwift`
-- `CombineExt` for reactive patterns
-- `SwiftLint` for linting and clean code
+| Component     | Tests                                         | Status      |
+|---------------|-----------------------------------------------|-------------|
+| Auth          | Sign up, sign in, session restore             | ✅ Complete |
+| Onboarding    | Profile data validation and saving            | ✅ Complete |
+| Rooms         | Create, join, real-time updates               | ✅ Complete |
+| Sessions      | Synchronized timer, status transitions        | ✅ Complete |
+| Voice         | Join, leave, mute                             | 🚧 Pending  |
+| Realtime      | Live updates for participants & room status   | ✅ Complete |
 
 ---
 
 ## 🚀 Launch Checklist
 
-- [x] Complete authentication (Google sign-in)
-- [x] Complete onboarding (profile creation, save to Supabase)
-- [ ] Complete onboarding → match → call flow
-- [ ] Run end-to-end manual tests
-- [ ] Push to TestFlight and gather feedback
-- [ ] Add App Store metadata (screenshots, privacy, icons)
-- [ ] Submit for App Store review
+- ✅ Complete authentication (Google sign-in)
+- ✅ Complete onboarding (profile creation)
+- ✅ Complete room creation and joining flow
+- ✅ Complete real-time synchronized session timer
+- 🚧 Implement in-app voice call
+- ⬜️ Run end-to-end manual tests
+- ⬜️ Push to TestFlight and gather feedback
+- ⬜️ Add App Store metadata
+- ⬜️ Submit for App Store review
 
 ---
 
 ## 🧠 Notes
 
-- Always validate session start/end server-side via Edge Functions
-- Use Supabase Realtime listeners to live update session & user state
-- Store call room IDs for debug/logging
+- The timer is driven by a UTC-based UNIX epoch (`session_started_epoch`) to ensure it's timezone-proof.
+- Realtime subscriptions on the `rooms` and `room_participants` tables are critical for the user experience.
+- The initial 1:1 matchmaking concept has been replaced by a more flexible, user-driven room model.
 
 ---
 
