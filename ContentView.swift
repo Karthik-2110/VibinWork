@@ -8,6 +8,17 @@
 import SwiftUI
 import Supabase
 
+// Helper for encoding heterogeneous values
+struct AnyEncodable: Encodable {
+    private let _encode: (Encoder) throws -> Void
+    init<T: Encodable>(_ value: T) {
+        _encode = value.encode
+    }
+    func encode(to encoder: Encoder) throws {
+        try _encode(encoder)
+    }
+}
+
 class AuthViewModel: ObservableObject {
     @Published var user: User?
     private var authTask: Task<Void, Never>?
@@ -52,7 +63,7 @@ class AuthViewModel: ObservableObject {
     }
 }
 
-struct UserProfile: Decodable, Encodable {
+struct UserProfile: Decodable, Encodable, Identifiable {
     let id: String
     let email: String
     let username: String?
@@ -65,47 +76,450 @@ struct UserProfile: Decodable, Encodable {
     let availability: String?
     let experience_level: String?
     let is_available: Bool?
+    let current_session_id: String?
 }
 
-struct MainView: View {
-    let user: User
-    @State private var isMatching = false
+struct Session: Codable, Identifiable {
+    let id: String
+    let user1_id: String
+    let user2_id: String
+    let start_time: String? // ISO8601 string, can be nil at creation
+    let end_time: String?   // ISO8601 string, can be nil at creation
+    let status: String      // 'active', 'completed', 'cancelled'
+    let duration_minutes: Int?
+    let voice_room_id: String?
+    let created_at: String? // ISO8601 string, set by Supabase
+}
+
+struct Room: Codable, Identifiable, Equatable {
+    let id: String
+    let host_id: String
+    let max_participants: Int
+    let status: String
+    let created_at: String?
+    let room_name: String?
+    let timer_minutes: Int?
+}
+
+struct RoomParticipant: Codable, Identifiable {
+    let id: String
+    let room_id: String
+    let user_id: String
+    let joined_at: String?
+}
+
+struct RoomListView: View {
+    @State private var rooms: [Room] = []
+    @State private var isLoading = false
+    @State private var error: String? = nil
+    @State private var showCreateRoom = false
+    @State private var selectedRoom: Room? = nil
+    @EnvironmentObject var authVM: AuthViewModel
+
     var body: some View {
-        let fullName: String = {
-            if let anyJson = user.userMetadata["full_name"], case let .string(name) = anyJson {
-                return name
+        NavigationView {
+            VStack {
+                if isLoading {
+                    ProgressView("Loading rooms...")
+                } else if let error = error {
+                    Text(error).foregroundColor(.red)
+                } else if rooms.isEmpty {
+                    Text("No open rooms available.")
+                        .foregroundColor(.secondary)
+                } else {
+                    List(rooms) { room in
+                        Button(action: { selectedRoom = room }) {
+                            VStack(alignment: .leading) {
+                                Text("Room ID: \(room.id)")
+                                    .font(.headline)
+                                Text("Host: \(room.host_id)")
+                                    .font(.subheadline)
+                                Text("Max Participants: \(room.max_participants)")
+                                    .font(.subheadline)
+                                Text("Status: \(room.status)")
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                }
+                Spacer()
+                Button(action: { showCreateRoom = true }) {
+                    HStack {
+                        Image(systemName: "plus")
+                        Text("Create Room")
+                    }
+                    .padding()
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .sheet(isPresented: $showCreateRoom) {
+                    CreateRoomView(isPresented: $showCreateRoom)
+                        .environmentObject(authVM)
+                }
+                .sheet(item: $selectedRoom) { room in
+                    RoomDetailsView(room: room, isPresented: $selectedRoom)
+                        .environmentObject(authVM)
+                }
             }
-            return "User"
-        }()
+            .padding()
+            .navigationTitle("Available Rooms")
+            .onAppear { fetchRooms() }
+        }
+    }
+
+    func fetchRooms() {
+        isLoading = true
+        error = nil
+        Task {
+            do {
+                let response = try await SupabaseManager.shared.client
+                    .from("rooms")
+                    .select()
+                    .eq("status", value: "open")
+                    .order("created_at", ascending: false)
+                    .execute()
+                let allRooms = try JSONDecoder().decode([Room].self, from: response.data)
+                // Optionally filter out full rooms (requires participant count logic)
+                await MainActor.run {
+                    self.rooms = allRooms
+                    self.isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.isLoading = false
+                }
+            }
+        }
+    }
+}
+
+struct CreateRoomView: View {
+    @Binding var isPresented: Bool
+    @State private var roomName: String = ""
+    @State private var maxParticipants: Int = 2
+    @State private var timerMinutes: Int = 25
+    @State private var isCreating = false
+    @State private var error: String? = nil
+    @State private var createdRoom: Room? = nil
+    @EnvironmentObject var authVM: AuthViewModel
+
+    var body: some View {
+        if let room = createdRoom {
+            HostWaitingRoomView(room: room)
+        } else {
+            VStack(spacing: 24) {
+                Text("Create a Room")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                TextField("Room Name", text: $roomName)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                Stepper("Max Participants: \(maxParticipants)", value: $maxParticipants, in: 1...10)
+                Stepper("Timer (minutes): \(timerMinutes)", value: $timerMinutes, in: 10...120, step: 5)
+                if let error = error {
+                    Text(error).foregroundColor(.red)
+                }
+                Button("Create Room") {
+                    createRoom()
+                }
+                .disabled(isCreating || roomName.isEmpty)
+                .padding()
+                .background((isCreating || roomName.isEmpty) ? Color.gray : Color.green)
+                .foregroundColor(.white)
+                .cornerRadius(10)
+                Spacer()
+                Button("Cancel") { isPresented = false }
+                    .foregroundColor(.red)
+            }
+            .padding()
+        }
+    }
+
+    func createRoom() {
+        guard let user = authVM.user else { return }
+        isCreating = true
+        error = nil
+        Task {
+            do {
+                let payload: [String: AnyEncodable] = [
+                    "host_id": AnyEncodable(user.id.uuidString),
+                    "max_participants": AnyEncodable(maxParticipants),
+                    "status": AnyEncodable("open"),
+                    "room_name": AnyEncodable(roomName),
+                    "timer_minutes": AnyEncodable(timerMinutes)
+                ]
+                let response = try await SupabaseManager.shared.client
+                    .from("rooms")
+                    .insert(payload)
+                    .select()
+                    .single()
+                    .execute()
+                let room = try JSONDecoder().decode(Room.self, from: response.data)
+                await MainActor.run {
+                    self.createdRoom = room
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.isCreating = false
+                }
+            }
+        }
+    }
+}
+
+// Add SessionView
+struct SessionView: View {
+    let room: Room
+    let participantsCount: Int
+    var body: some View {
         VStack(spacing: 24) {
-            Text("Welcome, \(fullName)!")
-                .font(.title)
-            Text("Email: \(user.email ?? "N/A")")
-                .foregroundColor(.secondary)
-            Spacer().frame(height: 32)
-            Button(action: {
-                isMatching = true
-            }) {
+            Text("Session in Progress").font(.largeTitle).fontWeight(.bold)
+            Text("Room: \(room.room_name ?? "Unnamed Room")")
+            Text("Timer: \(room.timer_minutes ?? 0) min")
+            Text("Participants: \(participantsCount)/\(room.max_participants)")
+            // Add more session UI here
+        }
+        .padding()
+    }
+}
+
+struct HostWaitingRoomView: View {
+    let room: Room
+    @State private var participants: [UserProfile] = []
+    @State private var isLoading = false
+    @State private var error: String? = nil
+    @State private var isStarting = false
+    @State private var sessionStarted = false
+    @State private var autoStartTimer: Timer? = nil
+    @State private var secondsLeft: Int = 180
+    @State private var roomStatus: String = "open"
+    @EnvironmentObject var authVM: AuthViewModel
+    @Environment(\.presentationMode) var presentationMode
+
+    var body: some View {
+        if roomStatus == "in_session" {
+            SessionView(room: room, participantsCount: participants.count)
+        } else {
+            VStack(spacing: 20) {
+                Text("Room: \(room.room_name ?? "")")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                Text("Participants (") + Text("\(participants.count)/\(room.max_participants)") + Text(")")
+                if isLoading {
+                    ProgressView("Waiting for partners…")
+                } else if let error = error {
+                    Text(error).foregroundColor(.red)
+                } else {
+                    ForEach(participants) { profile in
+                        ParticipantRow(profile: profile)
+                    }
+                }
+                if !sessionStarted {
+                    if participants.count > 0 {
+                        Text("Session will auto-start in \(secondsLeft) seconds if not started manually.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    } else {
+                        Text("Waiting for participants to join…")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                    Button("Start Session") {
+                        startSession()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isStarting || (room.max_participants == 1 ? false : participants.isEmpty))
+                    .padding()
+                    .background(isStarting ? Color.gray : Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                    Button("End Session") {
+                        endSession()
+                    }
+                    .padding(.top, 8)
+                    .foregroundColor(.red)
+                } else {
+                    Text("Session started!").foregroundColor(.green)
+                }
+                if room.max_participants == 1 {
+                    Text("You can start a solo session immediately.")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding()
+            .onAppear {
+                subscribeToRoomStatus()
+                subscribeToParticipants()
+            }
+            .onDisappear {
+                unsubscribeFromRoomStatus()
+                unsubscribeFromParticipants()
+            }
+        }
+    }
+
+    func startSession() {
+        isStarting = true
+        error = nil
+        autoStartTimer?.invalidate()
+        autoStartTimer = nil
+        Task {
+            do {
+                let updates: [String: AnyEncodable] = [
+                    "status": AnyEncodable("in_session")
+                ]
+                _ = try await SupabaseManager.shared.client
+                    .from("rooms")
+                    .update(updates)
+                    .eq("id", value: room.id)
+                    .execute()
+                await MainActor.run {
+                    sessionStarted = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.isStarting = false
+                }
+            }
+        }
+    }
+
+    func startAutoStartTimer() {
+        secondsLeft = 180
+        autoStartTimer?.invalidate()
+        autoStartTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { timer in
+            if sessionStarted { timer.invalidate(); return }
+            if secondsLeft > 0 {
+                secondsLeft -= 1
+            } else {
+                timer.invalidate()
+                startSession()
+            }
+        }
+    }
+
+    func endSession() {
+        autoStartTimer?.invalidate()
+        autoStartTimer = nil
+        Task {
+            do {
+                _ = try await SupabaseManager.shared.client
+                    .from("rooms")
+                    .delete()
+                    .eq("id", value: room.id)
+                    .execute()
+                await MainActor.run {
+                    presentationMode.wrappedValue.dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func subscribeToRoomStatus() {
+        RealtimeManager.shared.subscribeToRoomStatus(roomId: room.id) { updatedRoom in
+            DispatchQueue.main.async {
+                self.roomStatus = updatedRoom.status
+            }
+        }
+    }
+    private func unsubscribeFromRoomStatus() {
+        RealtimeManager.shared.unsubscribeRoomStatus()
+    }
+
+    private func subscribeToParticipants() {
+        RealtimeManager.shared.subscribeToParticipants(roomId: room.id) { updatedParticipants in
+            print("[Host] Real-time participants update: \(updatedParticipants.map { $0.user_id })")
+            Task {
+                var profiles: [UserProfile] = []
+                for p in updatedParticipants {
+                    do {
+                        let userResp = try await SupabaseManager.shared.client
+                            .from("users")
+                            .select()
+                            .eq("id", value: p.user_id)
+                            .single()
+                            .execute()
+                        if let profile = try? JSONDecoder().decode(UserProfile.self, from: userResp.data) {
+                            profiles.append(profile)
+                        }
+                    } catch {
+                        // Optionally log error
+                    }
+                }
+                await MainActor.run {
+                    self.participants = profiles
+                }
+            }
+        }
+    }
+    private func unsubscribeFromParticipants() {
+        RealtimeManager.shared.unsubscribeParticipants()
+    }
+}
+
+struct HomeScreenView: View {
+    @State private var showCreateRoom = false
+    @State private var showJoinRoom = false
+    @EnvironmentObject var authVM: AuthViewModel
+
+    var body: some View {
+        VStack(spacing: 40) {
+            Spacer()
+            Text("VibinWork Rooms")
+                .font(.largeTitle)
+                .fontWeight(.bold)
+            Spacer()
+            Button(action: { showCreateRoom = true }) {
                 HStack {
-                    Image(systemName: "person.2.fill")
-                    Text("Find Partner")
+                    Image(systemName: "plus.circle.fill")
+                    Text("Create Room")
+                        .font(.title2)
                         .fontWeight(.semibold)
                 }
-                .foregroundColor(.white)
                 .padding()
                 .frame(maxWidth: .infinity)
                 .background(Color.green)
+                .foregroundColor(.white)
                 .cornerRadius(12)
-                .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
             }
-            .accessibilityLabel("Find Partner")
-            .padding(.horizontal, 32)
+            .sheet(isPresented: $showCreateRoom) {
+                CreateRoomView(isPresented: $showCreateRoom)
+                    .environmentObject(authVM)
+            }
+            Button(action: { showJoinRoom = true }) {
+                HStack {
+                    Image(systemName: "person.3.fill")
+                    Text("Join Room")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                }
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(12)
+            }
+            .sheet(isPresented: $showJoinRoom) {
+                JoinRoomListView().environmentObject(authVM)
+            }
             Spacer()
         }
         .padding()
-        .fullScreenCover(isPresented: $isMatching) {
-            MatchLoadingView(isPresented: $isMatching)
-        }
+    }
+}
+
+// In MainView, show HomeScreenView as the entry point
+struct MainView: View {
+    let user: User
+    var body: some View {
+        HomeScreenView().environmentObject(AuthViewModel())
     }
 }
 
@@ -118,12 +532,18 @@ struct MatchLoadingView: View {
     @State private var searchTask: Task<Void, Never>? = nil
     @State private var partnerUnavailable = false
     @State private var partnerPollingTask: Task<Void, Never>? = nil
+    @State private var session: Session? = nil
 
     var body: some View {
         VStack(spacing: 32) {
             ProgressView()
                 .scaleEffect(2)
-            if let found = foundPartner {
+            if let session = session {
+                Text("Session created! ID: \(session.id)")
+                    .font(.title2)
+                    .fontWeight(.medium)
+                // Placeholder for SessionView transition
+            } else if let found = foundPartner {
                 Text("Found partner: \(found.username ?? "Unknown")")
                     .font(.title2)
                     .fontWeight(.medium)
@@ -189,8 +609,9 @@ struct MatchLoadingView: View {
                 .update(["is_available": true])
                 .eq("id", value: user.id.uuidString)
                 .execute()
-            // 2. Poll for available partners
+            // 2. Poll for available partners or own session assignment
             while !Task.isCancelled {
+                // Check for available partners
                 let response = try await SupabaseManager.shared.client
                     .from("users")
                     .select()
@@ -204,10 +625,85 @@ struct MatchLoadingView: View {
                         print("Found partner: \(partner)")
                         startPollingPartnerAvailability(partnerId: partner.id)
                     }
+                    // --- Atomic session creation logic ---
+                    // Fetch both users' latest records
+                    let myResponse = try await SupabaseManager.shared.client
+                        .from("users")
+                        .select()
+                        .eq("id", value: user.id.uuidString)
+                        .single()
+                        .execute()
+                    let partnerResponse = try await SupabaseManager.shared.client
+                        .from("users")
+                        .select()
+                        .eq("id", value: partner.id)
+                        .single()
+                        .execute()
+                    let me = try? JSONDecoder().decode(UserProfile.self, from: myResponse.data)
+                    let partnerProfile = try? JSONDecoder().decode(UserProfile.self, from: partnerResponse.data)
+                    if let sessionId = me?.current_session_id ?? partnerProfile?.current_session_id {
+                        // Join the existing session
+                        let sessionResp = try await SupabaseManager.shared.client
+                            .from("sessions")
+                            .select()
+                            .eq("id", value: sessionId)
+                            .single()
+                            .execute()
+                        if let session = try? JSONDecoder().decode(Session.self, from: sessionResp.data) {
+                            await MainActor.run {
+                                self.session = session
+                            }
+                        }
+                    } else {
+                        // Create a new session
+                        let session: Session
+                        do {
+                            session = try await SupabaseManager.shared.createSession(
+                                user1Id: user.id.uuidString,
+                                user2Id: partner.id,
+                                durationMinutes: partner.session_pref_duration ?? 25
+                            )
+                            try await SupabaseManager.shared.updateUsersForSession(
+                                user1Id: user.id.uuidString,
+                                user2Id: partner.id,
+                                sessionId: session.id
+                            )
+                            await MainActor.run {
+                                self.session = session
+                            }
+                        } catch {
+                            await MainActor.run {
+                                self.error = "Failed to create session: \(error.localizedDescription)"
+                            }
+                        }
+                    }
                     break
-                } else {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 }
+                // Check own user record for session assignment
+                let myResponse = try await SupabaseManager.shared.client
+                    .from("users")
+                    .select()
+                    .eq("id", value: user.id.uuidString)
+                    .single()
+                    .execute()
+                if let me = try? JSONDecoder().decode(UserProfile.self, from: myResponse.data),
+                   let isAvailable = me.is_available, !isAvailable,
+                   let sessionId = me.current_session_id {
+                    // Fetch the session and transition
+                    let sessionResp = try await SupabaseManager.shared.client
+                        .from("sessions")
+                        .select()
+                        .eq("id", value: sessionId)
+                        .single()
+                        .execute()
+                    if let session = try? JSONDecoder().decode(Session.self, from: sessionResp.data) {
+                        await MainActor.run {
+                            self.session = session
+                        }
+                        break
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
             }
         } catch {
             await MainActor.run {
@@ -308,7 +804,8 @@ struct OnboardingView: View {
             timezone: timezone,
             availability: availability,
             experience_level: experienceLevel,
-            is_available: nil // This will be updated by the backend
+            is_available: nil, // This will be updated by the backend
+            current_session_id: nil // This will be updated by the backend
         )
         do {
             // Upsert user profile (insert or update)
@@ -580,6 +1077,473 @@ struct ProfileCheckView: View {
             }
         } catch {
             await MainActor.run { onboardingState.showOnboarding = true; isLoading = false }
+        }
+    }
+}
+
+// Session creation logic
+import Supabase
+
+extension SupabaseManager {
+    func createSession(user1Id: String, user2Id: String, durationMinutes: Int?) async throws -> Session {
+        let sessionPayload: [String: AnyEncodable] = [
+            "user1_id": AnyEncodable(user1Id),
+            "user2_id": AnyEncodable(user2Id),
+            "status": AnyEncodable("active"),
+            "duration_minutes": AnyEncodable(durationMinutes ?? 25)
+        ]
+        let response = try await client
+            .from("sessions")
+            .insert(sessionPayload)
+            .select()
+            .single()
+            .execute()
+        let session = try JSONDecoder().decode(Session.self, from: response.data)
+        return session
+    }
+
+    func updateUsersForSession(user1Id: String, user2Id: String, sessionId: String) async throws {
+        print("Updating users for session. sessionId: \(sessionId)")
+        let updates: [String: AnyEncodable] = [
+            "is_available": AnyEncodable(false)
+            // "current_session_id": AnyEncodable(sessionId) // Uncomment after testing is_available only
+        ]
+        print("Update payload: \(updates)")
+        // Update both users in parallel
+        async let update1 = client.from("users").update(updates).eq("id", value: user1Id).execute()
+        async let update2 = client.from("users").update(updates).eq("id", value: user2Id).execute()
+        _ = try await (update1, update2)
+    }
+}
+
+struct RoomDetailsView: View {
+    let room: Room
+    @Binding var isPresented: Room?
+    @State private var participants: [RoomParticipant] = []
+    @State private var isLoading = false
+    @State private var error: String? = nil
+    @State private var isJoining = false
+    @State private var isStarting = false
+    @State private var sessionStarted = false
+    @EnvironmentObject var authVM: AuthViewModel
+
+    var isHost: Bool {
+        authVM.user?.id.uuidString == room.host_id
+    }
+
+    var isParticipant: Bool {
+        guard let userId = authVM.user?.id.uuidString else { return false }
+        return participants.contains(where: { $0.user_id == userId })
+    }
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Room ID: \(room.id)").font(.headline)
+            Text("Host: \(room.host_id)")
+            Text("Max Participants: \(room.max_participants)")
+            Text("Status: \(room.status)")
+            Divider()
+            if isLoading {
+                ProgressView("Loading participants...")
+            } else if let error = error {
+                Text(error).foregroundColor(.red)
+            } else if !isParticipant && !isHost {
+                Text("You are not in this room. Tap Join Room to participate.")
+                    .foregroundColor(.secondary)
+                Button("Join Room") {
+                    joinRoom()
+                }
+                .disabled(isJoining)
+                .padding()
+                .background(isJoining ? Color.gray : Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(10)
+            } else {
+                Text("Participants (") + Text("\(participants.count)/\(room.max_participants)") + Text(")")
+                List(participants) { p in
+                    Text(p.user_id)
+                }
+                Spacer()
+                if sessionStarted {
+                    Text("Session started!").foregroundColor(.green)
+                } else if isHost {
+                    Button("Start Session") {
+                        startSession()
+                    }
+                    .disabled(isStarting || participants.isEmpty)
+                    .padding()
+                    .background(isStarting ? Color.gray : Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                } else {
+                    Text("Waiting for host to start...").foregroundColor(.orange)
+                }
+            }
+            Button("Close") { isPresented = nil }
+                .foregroundColor(.red)
+        }
+        .padding()
+        .onAppear { fetchParticipants() }
+    }
+
+    func fetchParticipants() {
+        isLoading = true
+        error = nil
+        Task {
+            do {
+                let response = try await SupabaseManager.shared.client
+                    .from("room_participants")
+                    .select()
+                    .eq("room_id", value: room.id)
+                    .execute()
+                let allParticipants = try JSONDecoder().decode([RoomParticipant].self, from: response.data)
+                await MainActor.run {
+                    self.participants = allParticipants
+                    self.isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.isLoading = false
+                }
+            }
+        }
+    }
+
+    func joinRoom() {
+        guard let user = authVM.user else { return }
+        isJoining = true
+        error = nil
+        Task {
+            do {
+                let payload: [String: AnyEncodable] = [
+                    "room_id": AnyEncodable(room.id),
+                    "user_id": AnyEncodable(user.id.uuidString)
+                ]
+                _ = try await SupabaseManager.shared.client
+                    .from("room_participants")
+                    .insert(payload)
+                    .select()
+                    .single()
+                    .execute()
+                await MainActor.run {
+                    isJoining = false
+                    fetchParticipants()
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.isJoining = false
+                }
+            }
+        }
+    }
+
+    func startSession() {
+        isStarting = true
+        error = nil
+        Task {
+            do {
+                let updates: [String: AnyEncodable] = [
+                    "status": AnyEncodable("in_session")
+                ]
+                _ = try await SupabaseManager.shared.client
+                    .from("rooms")
+                    .update(updates)
+                    .eq("id", value: room.id)
+                    .execute()
+                await MainActor.run {
+                    sessionStarted = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.isStarting = false
+                }
+            }
+        }
+    }
+}
+
+struct JoinRoomListView: View {
+    @EnvironmentObject var authVM: AuthViewModel
+    @Environment(\.presentationMode) var presentationMode
+    @State private var rooms: [Room] = []
+    @State private var isLoading = false
+    @State private var error: String? = nil
+    @State private var selectedRoom: Room? = nil
+
+    var body: some View {
+        NavigationView {
+            VStack {
+                if isLoading {
+                    ProgressView("Loading rooms...")
+                } else if let error = error {
+                    Text(error).foregroundColor(.red)
+                } else if rooms.isEmpty {
+                    Text("No open rooms available.")
+                        .foregroundColor(.secondary)
+                } else {
+                    List(rooms) { room in
+                        Button(action: { selectedRoom = room }) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(room.room_name ?? "Unnamed Room")
+                                    .font(.headline)
+                                Text("Host: \(room.host_id)")
+                                    .font(.subheadline)
+                                Text("Participants: ?/\(room.max_participants)") // Will show actual count in details
+                                    .font(.caption)
+                                Text("Timer: \(room.timer_minutes ?? 0) min")
+                                    .font(.caption)
+                            }
+                        }
+                    }
+                }
+                Spacer()
+                Button("Close") { presentationMode.wrappedValue.dismiss() }
+                    .foregroundColor(.red)
+            }
+            .padding()
+            .navigationTitle("Join a Room")
+            .onAppear { fetchRooms() }
+            .sheet(item: $selectedRoom) { room in
+                JoinRoomDetailsView(room: room)
+                    .environmentObject(authVM)
+            }
+        }
+    }
+
+    func fetchRooms() {
+        isLoading = true
+        error = nil
+        Task {
+            do {
+                let response = try await SupabaseManager.shared.client
+                    .from("rooms")
+                    .select()
+                    .eq("status", value: "open")
+                    .order("created_at", ascending: false)
+                    .execute()
+                let allRooms = try JSONDecoder().decode([Room].self, from: response.data)
+                await MainActor.run {
+                    self.rooms = allRooms
+                    self.isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = error.localizedDescription
+                    self.isLoading = false
+                }
+            }
+        }
+    }
+}
+
+// Add ParticipantRow for displaying a user
+struct ParticipantRow: View {
+    let profile: UserProfile
+    var body: some View {
+        HStack {
+            // Placeholder avatar
+            Circle()
+                .fill(Color.blue)
+                .frame(width: 36, height: 36)
+                .overlay(Text(profile.username?.prefix(1).uppercased() ?? "?").foregroundColor(.white))
+            VStack(alignment: .leading) {
+                Text(profile.username ?? "User")
+                    .font(.headline)
+                if let goal = profile.focus_goal {
+                    Text(goal).font(.subheadline).foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct JoinRoomDetailsView: View {
+    let room: Room
+    @EnvironmentObject var authVM: AuthViewModel
+    @Environment(\.presentationMode) var presentationMode
+    @State private var participants: [UserProfile] = []
+    @State private var isLoading = false
+    @State private var error: String? = nil
+    @State private var isJoining = false
+    @State private var joined = false
+    @State private var waitingForHost = false
+    @State private var roomStatus: String = "open"
+    @State private var hostProfile: UserProfile? = nil
+    // ... existing code ...
+    var body: some View {
+        if roomStatus == "in_session" {
+            SessionView(room: room, participantsCount: participants.count)
+        } else {
+            VStack {
+                if isLoading {
+                    ProgressView()
+                } else if let error = error {
+                    Text(error).foregroundColor(.red)
+                } else {
+                    if !joined {
+                        // Show host as the only participant before joining
+                        if let hostProfile = getHostProfile() {
+                            ParticipantRow(profile: hostProfile)
+                        } else {
+                            Text("Host info unavailable")
+                        }
+                        Text("Room is waiting for \(room.max_participants - 1) more participant\(room.max_participants - 1 == 1 ? "" : "s").")
+                            .foregroundColor(.secondary)
+                    } else {
+                        // After joining, show both host and joiner
+                        if let hostProfile = getHostProfile() {
+                            ParticipantRow(profile: hostProfile)
+                        }
+                        ForEach(participants.filter { $0.id != room.host_id }) { profile in
+                            ParticipantRow(profile: profile)
+                        }
+                        if (participants.count + 1) >= room.max_participants {
+                            Text("Room is full, waiting for host to start.")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                Spacer()
+                if !joined {
+                    Button("Join Room") {
+                        joinRoom()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.bottom, 8)
+                }
+                Button("Close") {
+                    presentationMode.wrappedValue.dismiss()
+                }
+                .foregroundColor(.red)
+                .padding(.bottom, 16)
+            }
+            .onAppear {
+                print("JoinRoomDetailsView appeared for room: \(room.id)")
+                fetchHostProfile()
+                if joined {
+                    subscribeToParticipants()
+                    subscribeToRoomStatus()
+                }
+            }
+            .onDisappear {
+                print("JoinRoomDetailsView disappeared")
+                unsubscribeFromParticipants()
+                unsubscribeFromRoomStatus()
+            }
+        }
+    }
+    // Helper to get host profile
+    private func getHostProfile() -> UserProfile? {
+        return hostProfile
+    }
+    // Fetch host profile from Supabase
+    private func fetchHostProfile() {
+        isLoading = true
+        Task {
+            do {
+                let userResp = try await SupabaseManager.shared.client
+                    .from("users")
+                    .select()
+                    .eq("id", value: room.host_id)
+                    .single()
+                    .execute()
+                if let profile = try? JSONDecoder().decode(UserProfile.self, from: userResp.data) {
+                    await MainActor.run {
+                        self.hostProfile = profile
+                        self.isLoading = false
+                    }
+                } else {
+                    await MainActor.run {
+                        self.error = "Failed to decode host profile."
+                        self.isLoading = false
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = "Failed to fetch host profile."
+                    self.isLoading = false
+                }
+            }
+        }
+    }
+    // Subscribe to participants in real time
+    private func subscribeToParticipants() {
+        RealtimeManager.shared.subscribeToParticipants(roomId: room.id) { updatedParticipants in
+            Task {
+                var profiles: [UserProfile] = []
+                for p in updatedParticipants {
+                    do {
+                        let userResp = try await SupabaseManager.shared.client
+                            .from("users")
+                            .select()
+                            .eq("id", value: p.user_id)
+                            .single()
+                            .execute()
+                        if let profile = try? JSONDecoder().decode(UserProfile.self, from: userResp.data) {
+                            profiles.append(profile)
+                        }
+                    } catch {
+                        // Optionally log error
+                    }
+                }
+                await MainActor.run {
+                    self.participants = profiles
+                }
+            }
+        }
+    }
+    // Subscribe to room status in real time
+    private func subscribeToRoomStatus() {
+        RealtimeManager.shared.subscribeToRoomStatus(roomId: room.id) { updatedRoom in
+            DispatchQueue.main.async {
+                print("[Joiner] Room status update: \(updatedRoom.status)")
+                self.roomStatus = updatedRoom.status
+            }
+        }
+    }
+    // Unsubscribe from participants and room status
+    private func unsubscribeFromParticipants() {
+        RealtimeManager.shared.unsubscribeParticipants()
+    }
+    private func unsubscribeFromRoomStatus() {
+        RealtimeManager.shared.unsubscribeRoomStatus()
+    }
+
+    private func joinRoom() {
+        guard let user = authVM.user else {
+            self.error = "User not authenticated."
+            return
+        }
+        isJoining = true
+        error = nil
+        Task {
+            do {
+                let payload: [String: AnyEncodable] = [
+                    "room_id": AnyEncodable(room.id),
+                    "user_id": AnyEncodable(user.id.uuidString)
+                ]
+                _ = try await SupabaseManager.shared.client
+                    .from("room_participants")
+                    .insert(payload)
+                    .execute()
+                await MainActor.run {
+                    self.isJoining = false
+                    self.joined = true
+                    self.waitingForHost = true
+                    self.subscribeToParticipants()
+                    self.subscribeToRoomStatus() // Ensure joiner listens for session start
+                }
+            } catch {
+                await MainActor.run {
+                    self.error = "Failed to join room: \(error.localizedDescription)"
+                    self.isJoining = false
+                }
+            }
         }
     }
 }
